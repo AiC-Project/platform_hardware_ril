@@ -49,7 +49,7 @@ static void *noopRemoveWarning( void *a ) { return a; }
 #define MAX_AT_RESPONSE 0x1000
 
 /* pathname returned from RIL_REQUEST_SETUP_DATA_CALL / RIL_REQUEST_SETUP_DEFAULT_PDP */
-#define PPP_TTY_PATH "eth0"
+#define PPP_TTY_PATH "eth2"
 
 // Default MTU value
 #define DEFAULT_MTU 1500
@@ -1641,6 +1641,12 @@ error2:
     RIL_onRequestComplete(t, RIL_E_SMS_SEND_FAIL_RETRY, &response, sizeof(response));
 }
 
+static void requestDeactivateDataCall(void *data, size_t datalen, RIL_Token t)
+{
+    RLOGD("Ending data call");
+    at_send_command("AT+CGACT=0,0", NULL);
+    requestOrSendDataCallList(NULL);
+}
 static void requestSetupDataCall(void *data, size_t datalen, RIL_Token t)
 {
     const char *apn;
@@ -1666,91 +1672,43 @@ static void requestSetupDataCall(void *data, size_t datalen, RIL_Token t)
     int retry = 10;
     const char *pdp_type;
 
+
+    RLOGD("Setting up data call");
+
+    /*
     RLOGD("requesting data connection to APN '%s'", apn);
+    qmistatus = system("netcfg eth2 dhcp");
+    RLOGD("netcfg eth2 dhcp: status %d\n", qmistatus);
+    */
 
-    fd = open ("/dev/qmi", O_RDWR);
-    if (fd >= 0) { /* the device doesn't exist on the emulator */
-
-        RLOGD("opened the qmi device\n");
-        asprintf(&cmd, "up:%s", apn);
-        len = strlen(cmd);
-
-        while (cur < len) {
-            do {
-                written = write (fd, cmd + cur, len - cur);
-            } while (written < 0 && errno == EINTR);
-
-            if (written < 0) {
-                RLOGE("### ERROR writing to /dev/qmi");
-                close(fd);
-                goto error;
-            }
-
-            cur += written;
-        }
-
-        // wait for interface to come online
-
-        do {
-            sleep(1);
-            do {
-                rlen = read(fd, status, 31);
-            } while (rlen < 0 && errno == EINTR);
-
-            if (rlen < 0) {
-                RLOGE("### ERROR reading from /dev/qmi");
-                close(fd);
-                goto error;
-            } else {
-                status[rlen] = '\0';
-                RLOGD("### status: %s", status);
-            }
-        } while (strncmp(status, "STATE=up", 8) && strcmp(status, "online") && --retry);
-
-        close(fd);
-
-        if (retry == 0) {
-            RLOGE("### Failed to get data connection up\n");
-            goto error;
-        }
-
-        qmistatus = system("netcfg rmnet0 dhcp");
-
-        RLOGD("netcfg rmnet0 dhcp: status %d\n", qmistatus);
-
-        if (qmistatus < 0) goto error;
-
+    if (datalen > 6 * sizeof(char *)) {
+        pdp_type = ((const char **)data)[6];
     } else {
+        pdp_type = "IP";
+    }
 
-        if (datalen > 6 * sizeof(char *)) {
-            pdp_type = ((const char **)data)[6];
-        } else {
-            pdp_type = "IP";
-        }
+    asprintf(&cmd, "AT+CGDCONT=1,\"%s\",\"%s\",,0,0", pdp_type, apn);
+    //FIXME check for error here
+    err = at_send_command(cmd, NULL);
+    free(cmd);
 
-        asprintf(&cmd, "AT+CGDCONT=1,\"%s\",\"%s\",,0,0", pdp_type, apn);
-        //FIXME check for error here
-        err = at_send_command(cmd, NULL);
-        free(cmd);
+    // Set required QoS params to default
+    err = at_send_command("AT+CGQREQ=1", NULL);
 
-        // Set required QoS params to default
-        err = at_send_command("AT+CGQREQ=1", NULL);
+    // Set minimum QoS params to default
+    err = at_send_command("AT+CGQMIN=1", NULL);
 
-        // Set minimum QoS params to default
-        err = at_send_command("AT+CGQMIN=1", NULL);
+    // packet-domain event reporting
+    err = at_send_command("AT+CGEREP=1,0", NULL);
 
-        // packet-domain event reporting
-        err = at_send_command("AT+CGEREP=1,0", NULL);
+    // Hangup anything that's happening there now
+    err = at_send_command("AT+CGACT=1,0", NULL);
 
-        // Hangup anything that's happening there now
-        err = at_send_command("AT+CGACT=1,0", NULL);
+    // Start data on PDP context 1
+    err = at_send_command("ATD*99***1#", &p_response);
 
-        // Start data on PDP context 1
-        err = at_send_command("ATD*99***1#", &p_response);
-
-        if (err < 0 || p_response->success == 0) {
-            goto error;
-        }
+    if (err < 0 || p_response->success == 0) {
+        goto error;
     }
 
     requestOrSendDataCallList(&t);
@@ -2166,6 +2124,9 @@ onRequest (int request, void *data, size_t datalen, RIL_Token t)
             break;
         case RIL_REQUEST_SETUP_DATA_CALL:
             requestSetupDataCall(data, datalen, t);
+            break;
+        case RIL_REQUEST_DEACTIVATE_DATA_CALL:
+            requestDeactivateDataCall(data, datalen, t);
             break;
         case RIL_REQUEST_SMS_ACKNOWLEDGE:
             requestSMSAcknowledge(data, datalen, t);
@@ -3166,7 +3127,7 @@ static void onUnsolicited (const char *s, const char *sms_pdu)
                 break;
             case 1: // current mode correctly parsed
             case 0: // preferred mode correctly parsed
-                mask = 1 << tech;
+                mask = tech;
                 if (mask != MDM_GSM && mask != MDM_CDMA &&
                      mask != MDM_WCDMA && mask != MDM_LTE) {
                     RLOGE("Unknown technology %d\n", tech);
